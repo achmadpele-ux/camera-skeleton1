@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Running Time Monitor (Touchscreen + Auto Rotate)</title>
+  <style>
+    body { margin:0; background:#111; color:#fff; font-family:Arial; text-align:center; }
+    #videoCanvas { background:#000; touch-action:none; cursor:crosshair; max-width:100%; }
+    #controls { margin:10px; display:flex; flex-wrap:wrap; justify-content:center; gap:10px; }
+    button { margin:5px; padding:10px 15px; border:none; border-radius:5px; cursor:pointer; font-size:14px; }
+    #dataLog { margin-top:15px; background:#222; padding:10px; max-height:200px; overflow-y:auto; }
+    table { width:100%; border-collapse: collapse; color:#fff; }
+    th, td { border:1px solid #555; padding:5px; font-size:12px; }
+    .active { background:green; color:white; }
+    .inactive { background:red; color:white; }
+  </style>
+</head>
+<body>
+  <h2>📷 Running Time Monitor</h2>
+  <video id="video" playsinline autoplay muted style="display:none;"></video>
+  <canvas id="videoCanvas"></canvas>
+  
+  <div id="controls">
+    <button onclick="addBox()">➕ Tambah Kotak</button>
+    <button onclick="removeBox()">➖ Hapus Kotak</button>
+    <button onclick="toggleSLine()">🔀 Toggle S Line</button>
+    <button id="modeBtn" onclick="toggleMode()" class="inactive">🔴 Mode: Non-Aktif</button>
+    <button onclick="switchCamera()">📲 Switch Kamera</button>
+  </div>
+
+  <div id="dataLog">
+    <h3>📊 Data Log</h3>
+    <table>
+      <thead>
+        <tr><th>Waktu</th><th>Event</th><th>Durasi (s)</th></tr>
+      </thead>
+      <tbody id="logTable"></tbody>
+    </table>
+    <button onclick="exportLog()">💾 Export ke Excel (CSV)</button>
+  </div>
+
+  <!-- Mediapipe -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+  <script>
+    window.onload = function(){
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('videoCanvas');
+      const ctx = canvas.getContext('2d');
+
+      let boxes = [];
+      let sLine = { active:true, x:200 };
+      let modeActive = false; 
+      let currentFacing = "user"; 
+      let orientation = 0; 
+      let logs = []; 
+
+      // ----- LOG -----
+      function addLog(event, duration=0){
+        const now = new Date().toLocaleTimeString();
+        logs.push([now, event, duration.toFixed(1)]);
+        document.getElementById("logTable").innerHTML += 
+          `<tr><td>${now}</td><td>${event}</td><td>${duration.toFixed(1)}</td></tr>`;
+      }
+
+      function exportLog(){
+        let csv = "Waktu,Event,Durasi(s)\n";
+        logs.forEach(row=>{ csv += row.join(",") + "\n"; });
+        const blob = new Blob([csv], {type:"text/csv"});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = "datalog.csv"; a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      // ----- Mode Aktif -----
+      function toggleMode(){
+        modeActive = !modeActive;
+        const btn = document.getElementById("modeBtn");
+        if(modeActive){
+          btn.textContent = "🟢 Mode: Aktif";
+          btn.className = "active";
+        } else {
+          btn.textContent = "🔴 Mode: Non-Aktif";
+          btn.className = "inactive";
+          boxes.forEach((box,i)=>{
+            if(box.cycle.active){
+              box.cycle.active=false;
+              let duration=(Date.now()-box.cycle.start)/1000;
+              addLog(`Stop Running Time (Box ${i+1}, Mode Off)`, duration);
+              box.cycle.time=0;
+            }
+          });
+        }
+      }
+
+      // ----- BOX -----
+      function addBox(){
+        const newBox = {
+          x:100+boxes.length*50,
+          y:100,
+          w:120,
+          h:120,
+          cycle:{active:false,start:0,time:0}
+        };
+        boxes.push(newBox);
+      }
+      function removeBox(){ if(boxes.length>0) boxes.pop(); }
+      function toggleSLine(){ sLine.active = !sLine.active; }
+      function pointInBox(x,y,box,margin=10){ 
+        return x>box.x-margin && x<box.x+box.w+margin && y>box.y-margin && y<box.y+box.h+margin; 
+      }
+
+      function isNear(x,y,cx,cy,r=12){ return Math.hypot(x-cx,y-cy)<r; }
+
+      // gambar handle kotak
+      function drawHandles(box){
+        ctx.fillStyle="yellow"; // drag
+        ctx.beginPath(); ctx.arc(box.x+box.w/2, box.y-10, 6, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle="red"; // resize
+        ctx.beginPath(); ctx.arc(box.x+box.w, box.y+box.h, 6, 0, Math.PI*2); ctx.fill();
+      }
+
+      // ----- Mediapipe Pose -----
+      const pose = new Pose({
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }
+      });
+      pose.setOptions({
+        modelComplexity:1,
+        smoothLandmarks:true,
+        minDetectionConfidence:0.4,
+        minTrackingConfidence:0.4
+      });
+      pose.onResults(onPoseResults);
+
+      function onPoseResults(results){
+        ctx.save();
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+
+        if(orientation === 90){ ctx.translate(canvas.width,0); ctx.rotate(Math.PI/2); }
+        else if(orientation === -90){ ctx.translate(0,canvas.height); ctx.rotate(-Math.PI/2); }
+        else if(orientation === 180){ ctx.translate(canvas.width,canvas.height); ctx.rotate(Math.PI); }
+        if(currentFacing==="user"){ ctx.translate(canvas.width,0); ctx.scale(-1,1); }
+
+        ctx.drawImage(results.image,0,0,canvas.width,canvas.height);
+
+        if(results.poseLandmarks){
+          const landmarks = results.poseLandmarks;
+          const points = landmarks.map(p=>({x:p.x*canvas.width,y:p.y*canvas.height}));
+
+          // --- S-Line ---
+          let crossLine = false;
+          if(sLine.active){
+            crossLine = points.some(pt=>Math.abs(pt.x-sLine.x)<10); // lebih sensitif
+            ctx.strokeStyle = crossLine ? "red":"cyan";
+            ctx.beginPath(); ctx.moveTo(sLine.x,0); ctx.lineTo(sLine.x,canvas.height); ctx.stroke();
+            ctx.fillStyle="#fff"; ctx.fillText(`S-Line`, sLine.x+5, 20);
+
+            // handle atas & bawah
+            ctx.fillStyle="orange";
+            ctx.beginPath(); ctx.arc(sLine.x, 10, 6, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(sLine.x, canvas.height-10, 6, 0, Math.PI*2); ctx.fill();
+          }
+
+          // --- Kotak ---
+          boxes.forEach((box,i)=>{
+            const inside = points.some(pt=>pointInBox(pt.x,pt.y,box,10));
+
+            ctx.strokeStyle = inside ? "red":"lime";
+            ctx.strokeRect(box.x,box.y,box.w,box.h);
+            ctx.fillStyle="#fff"; ctx.fillText(`Box ${i+1}`, box.x, box.y-15);
+
+            drawHandles(box);
+
+            if(modeActive){
+              if(inside && crossLine && !box.cycle.active){
+                box.cycle.active = true;
+                box.cycle.start = Date.now();
+                addLog(`Start Running Time (Box ${i+1})`);
+              } else if(box.cycle.active && (!inside || !crossLine)){
+                box.cycle.active = false;
+                box.cycle.time = (Date.now()-box.cycle.start)/1000;
+                addLog(`Stop Running Time (Box ${i+1})`, box.cycle.time);
+                box.cycle.time=0;
+              }
+            }
+
+            if(box.cycle.active && modeActive){
+              let elapsed = (Date.now()-box.cycle.start)/1000;
+              ctx.fillStyle="yellow";
+              ctx.fillText(`Box ${i+1}: ${elapsed.toFixed(1)}s`, box.x, box.y+box.h+20);
+            }
+          });
+        }
+        ctx.restore();
+      }
+
+      // ----- Kamera -----
+      async function initCamera(){
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            video:{ facingMode: currentFacing }, audio:false 
+          });
+          video.srcObject = stream;
+          video.onloadedmetadata = ()=>{
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            video.play(); runPose();
+          }
+        } catch(err){ alert("Tidak bisa akses kamera: " + err.message); }
+      }
+
+      function switchCamera(){
+        currentFacing = currentFacing === "user" ? "environment" : "user";
+        if(video.srcObject){ video.srcObject.getTracks().forEach(track => track.stop()); }
+        initCamera();
+      }
+
+      async function runPose(){
+        async function processFrame(){ await pose.send({image:video}); requestAnimationFrame(processFrame); }
+        processFrame();
+      }
+
+      // ----- Auto Rotate -----
+      function updateOrientation(){
+        if(window.orientation===90) orientation=90;
+        else if(window.orientation===-90) orientation=-90;
+        else if(window.orientation===180) orientation=180;
+        else orientation=0;
+      }
+      window.addEventListener("orientationchange", updateOrientation);
+      updateOrientation();
+
+      // ----- Drag & Resize -----
+      let draggingBox=null, resizingBox=null, draggingSLine=false, dragOffsetX=0, dragOffsetY=0;
+      function startDrag(x,y){
+        if(isNear(x,y,sLine.x,10) || isNear(x,y,sLine.x,canvas.height-10)){
+          draggingSLine=true; return;
+        }
+        boxes.forEach(box=>{
+          if(isNear(x,y, box.x+box.w/2, box.y-10)){ // drag handle
+            draggingBox=box; dragOffsetX=x-box.x; dragOffsetY=y-box.y; return;
+          }
+          if(isNear(x,y, box.x+box.w, box.y+box.h)){ // resize handle
+            resizingBox=box; return;
+          }
+        });
+      }
+      function moveDrag(x,y){
+        if(draggingSLine){ sLine.x=x; }
+        if(draggingBox){ draggingBox.x=x-dragOffsetX; draggingBox.y=y-dragOffsetY; }
+        if(resizingBox){ resizingBox.w=x-resizingBox.x; resizingBox.h=y-resizingBox.y; }
+      }
+      function endDrag(){ draggingBox=null; resizingBox=null; draggingSLine=false; }
+
+      canvas.addEventListener("mousedown",(e)=>{ const r=canvas.getBoundingClientRect(); startDrag(e.clientX-r.left,e.clientY-r.top); });
+      canvas.addEventListener("mousemove",(e)=>{ const r=canvas.getBoundingClientRect(); moveDrag(e.clientX-r.left,e.clientY-r.top); });
+      canvas.addEventListener("mouseup",endDrag);
+      canvas.addEventListener("touchstart",(e)=>{ const r=canvas.getBoundingClientRect(); const t=e.touches[0]; startDrag(t.clientX-r.left,t.clientY-r.top); });
+      canvas.addEventListener("touchmove",(e)=>{ const r=canvas.getBoundingClientRect(); const t=e.touches[0]; moveDrag(t.clientX-r.left,t.clientY-r.top); });
+      canvas.addEventListener("touchend",endDrag);
+
+      // start
+      window.addBox = addBox;
+      window.removeBox = removeBox;
+      window.toggleSLine = toggleSLine;
+      window.toggleMode = toggleMode;
+      window.switchCamera = switchCamera;
+      window.exportLog = exportLog;
+      initCamera();
+    }
+  </script>
+</body>
+</html>
