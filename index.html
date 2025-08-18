@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Running Time Monitor (Touchscreen + Auto Rotate)</title>
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      color: #fff;
+      font-family: Arial, sans-serif;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    h2 {
+      margin-top: 15px;
+      margin-bottom: 10px;
+    }
+    #videoCanvas {
+      background: #000;
+      touch-action: none;
+      cursor: crosshair;
+      max-width: 100%;
+      height: auto;
+      display: block;
+      border: 1px solid #444;
+      box-sizing: border-box;
+    }
+    #controls {
+      margin: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      padding: 5px;
+      background: #222;
+      border-radius: 8px;
+      width: 95%;
+      max-width: 700px;
+    }
+    button {
+      margin: 5px;
+      padding: 10px 15px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 14px;
+      background: #444;
+      color: #fff;
+      transition: background 0.3s ease;
+      flex-grow: 1;
+      min-width: 120px;
+    }
+    button:hover {
+      background: #555;
+    }
+    .active {
+      background: green;
+      color: white;
+    }
+    .inactive {
+      background: red;
+      color: white;
+    }
+    #dataLog {
+      margin-top: 15px;
+      background: #222;
+      padding: 10px;
+      max-height: 200px;
+      overflow-y: auto;
+      border-radius: 8px;
+      width: 95%;
+      max-width: 700px;
+      margin-bottom: 20px;
+    }
+    #dataLog h3 {
+      margin-top: 0;
+      color: #eee;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      color: #fff;
+      margin-bottom: 10px;
+    }
+    th, td {
+      border: 1px solid #555;
+      padding: 8px;
+      font-size: 12px;
+      text-align: left;
+    }
+    th {
+      background: #333;
+    }
+    @media (max-width: 600px) {
+      #controls {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      button {
+        width: 100%;
+        margin: 5px 0;
+      }
+      #dataLog {
+        width: 95%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <h2>📷 Running Time Monitor</h2>
+  <video id="video" playsinline autoplay muted style="display:none;"></video>
+  <canvas id="videoCanvas"></canvas>
+  
+  <div id="controls">
+    <button onclick="addBox()">➕ Tambah Kotak</button>
+    <button onclick="removeBox()">➖ Hapus Kotak</button>
+    <button onclick="toggleSLine()">🔀 Toggle S Line</button>
+    <button id="modeBtn" onclick="toggleMode()" class="inactive">🔴 Mode: Non-Aktif</button>
+    <button onclick="switchCamera()">📲 Switch Kamera</button>
+  </div>
+
+  <div id="dataLog">
+    <h3>📊 Data Log</h3>
+    <table>
+      <thead>
+        <tr><th>Waktu</th><th>Event</th><th>Durasi (s)</th></tr>
+      </thead>
+      <tbody id="logTable"></tbody>
+    </table>
+    <button onclick="exportLog()">💾 Export ke Excel (CSV)</button>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose"></script>
+  <script>
+    window.onload = function(){
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('videoCanvas');
+      const ctx = canvas.getContext('2d');
+
+      let boxes = [];
+      let sLine = { active: true, x: 200, w: 50 };
+      let modeActive = false; 
+      let currentFacing = "user";
+      let orientation = 0;
+      let logs = []; 
+      
+      let frontCameraId = null;
+      let backCameraId = null;
+
+      async function getCameras() {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+          stream.getTracks().forEach(track => track.stop());
+
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          devices.forEach(device => {
+            if (device.kind === 'videoinput') {
+              if (device.label.toLowerCase().includes('front') || device.label.toLowerCase().includes('depan')) {
+                  frontCameraId = device.deviceId;
+              } else if (device.label.toLowerCase().includes('back') || device.label.toLowerCase().includes('belakang')) {
+                  backCameraId = device.deviceId;
+              }
+            }
+          });
+
+          if (!frontCameraId && !backCameraId && devices.length > 1) {
+            frontCameraId = devices[0].deviceId;
+            backCameraId = devices[1].deviceId;
+          }
+
+          console.log("Kamera depan:", frontCameraId);
+          console.log("Kamera belakang:", backCameraId);
+          initCamera(frontCameraId);
+        } catch (err) {
+          alert("Tidak bisa mengakses kamera: " + err.message);
+          console.error("Camera access error:", err);
+        }
+      }
+
+      async function initCamera(deviceId) {
+        try {
+          const constraints = { video: {} };
+          if (deviceId) {
+            constraints.video.deviceId = { exact: deviceId };
+          } else {
+            constraints.video.facingMode = currentFacing;
+          }
+          
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          video.srcObject = stream;
+          video.onloadedmetadata = () => {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            video.play();
+            runPose();
+          };
+        } catch (err) {
+          alert("Tidak bisa mengakses kamera: " + err.message);
+          console.error("Camera access error:", err);
+        }
+      }
+
+      function switchCamera() {
+        if (!frontCameraId || !backCameraId) {
+          alert("Tidak dapat beralih kamera. ID kamera belum terdeteksi.");
+          return;
+        }
+
+        if (video.srcObject) {
+          video.srcObject.getTracks().forEach(track => track.stop());
+        }
+
+        if (currentFacing === "user") {
+          initCamera(backCameraId);
+          currentFacing = "environment";
+        } else {
+          initCamera(frontCameraId);
+          currentFacing = "user";
+        }
+      }
+
+      function addLog(event, duration = 0){
+        const now = new Date().toLocaleTimeString();
+        logs.push([now, event, duration.toFixed(1)]);
+        const logTable = document.getElementById("logTable");
+        const newRow = logTable.insertRow();
+        newRow.innerHTML = `<td>${now}</td><td>${event}</td><td>${duration.toFixed(1)}</td>`;
+        logTable.scrollTop = logTable.scrollHeight;
+      }
+
+      function exportLog(){
+        let csv = "Waktu,Event,Durasi(s)\n";
+        logs.forEach(row => {
+          const escapedEvent = `"${String(row[1]).replace(/"/g, '""')}"`;
+          csv += `${String(row[0])},${escapedEvent},${String(row[2])}\n`;
+        });
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "datalog.csv";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+
+      function toggleMode(){
+        modeActive = !modeActive;
+        const btn = document.getElementById("modeBtn");
+        if(modeActive){
+          btn.textContent = "🟢 Mode: Aktif";
+          btn.className = "active";
+        } else {
+          btn.textContent = "🔴 Mode: Non-Aktif";
+          btn.className = "inactive";
+          boxes.forEach((box, i) => {
+            if(box.cycle.active){
+              box.cycle.active = false;
+              let duration = (Date.now() - box.cycle.start) / 1000;
+              addLog(`Stop Running Time (Box ${i+1}, Mode Off)`, duration);
+              box.cycle.time = 0;
+            }
+          });
+        }
+      }
+
+      function addBox(){
+        const newBox = {
+          x: 100 + boxes.length * 50,
+          y: 100,
+          w: 120,
+          h: 120,
+          cycle: { active: false, start: 0, time: 0 }
+        };
+        boxes.push(newBox);
+      }
+
+      function removeBox(){
+        if(boxes.length > 0) {
+          const lastBox = boxes[boxes.length - 1];
+          if (lastBox.cycle.active) {
+            lastBox.cycle.active = false;
+            let duration = (Date.now() - lastBox.cycle.start) / 1000;
+            addLog(`Stop Running Time (Box ${boxes.length}, Removed)`, duration);
+          }
+          boxes.pop();
+        }
+      }
+
+      function toggleSLine(){
+        sLine.active = !sLine.active;
+      }
+
+      function pointInBox(x, y, box, margin = 10){
+        return x > box.x - margin && x < box.x + box.w + margin &&
+               y > box.y - margin && y < box.y + box.h + margin; 
+      }
+
+      function isNear(x, y, cx, cy, r = 25){
+        return Math.hypot(x - cx, y - cy) < r;
+      }
+
+      function drawHandles(box){
+        ctx.fillStyle = "yellow";
+        ctx.beginPath();
+        ctx.arc(box.x + box.w / 2, box.y - 10, 6, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "red";
+        ctx.beginPath();
+        ctx.arc(box.x + box.w, box.y + box.h, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      const pose = new Pose({
+        locateFile: (file) => {
+          return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }
+      });
+
+      pose.setOptions({
+        modelComplexity: 1,
+        smoothLandmarks: true,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+
+      pose.onResults(onPoseResults);
+
+      function onPoseResults(results){
+        ctx.save();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        ctx.save();
+        if(orientation === 90){ ctx.translate(canvas.width, 0); ctx.rotate(Math.PI / 2); }
+        else if(orientation === -90){ ctx.translate(0, canvas.height); ctx.rotate(-Math.PI / 2); }
+        else if(orientation === 180){ ctx.translate(canvas.width, canvas.height); ctx.rotate(Math.PI); }
+        if(currentFacing === "user"){ ctx.translate(canvas.width, 0); ctx.scale(-1, 1); }
+        ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+
+        ctx.save();
+        
+        const untransformedPoints = results.poseLandmarks ? results.poseLandmarks.map(p => {
+            let px = p.x * canvas.width;
+            let py = p.y * canvas.height;
+            if (currentFacing === "user") { px = canvas.width - px; }
+            return { x: px, y: py };
+        }) : [];
+
+        let crossLine = false;
+        if(sLine.active){
+            crossLine = untransformedPoints.some(pt => pt.x > sLine.x && pt.x < sLine.x + sLine.w);
+            
+            ctx.fillStyle = crossLine ? "rgba(255, 0, 0, 0.3)" : "rgba(0, 255, 255, 0.3)";
+            ctx.fillRect(sLine.x, 0, sLine.w, canvas.height);
+
+            ctx.strokeStyle = crossLine ? "red" : "cyan";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(sLine.x, 0);
+            ctx.lineTo(sLine.x, canvas.height);
+            ctx.moveTo(sLine.x + sLine.w, 0);
+            ctx.lineTo(sLine.x + sLine.w, canvas.height);
+            ctx.stroke();
+
+            ctx.fillStyle = "#fff";
+            ctx.font = "14px Arial";
+            ctx.fillText(`S-Line`, sLine.x + 5, 20);
+
+            ctx.fillStyle = "orange";
+            ctx.beginPath(); ctx.arc(sLine.x + sLine.w / 2, 10, 6, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(sLine.x + sLine.w / 2, canvas.height - 10, 6, 0, Math.PI * 2); ctx.fill();
+        }
+
+        boxes.forEach((box, i) => {
+          const inside = untransformedPoints.some(pt => pointInBox(pt.x, pt.y, box, 0));
+          
+          ctx.fillStyle = inside ? "rgba(255, 0, 0, 0.3)" : "rgba(0, 255, 0, 0.3)";
+          ctx.fillRect(box.x, box.y, box.w, box.h);
+
+          ctx.strokeStyle = inside ? "red" : "lime";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(box.x, box.y, box.w, box.h);
+          
+          ctx.fillStyle = "#fff";
+          ctx.font = "14px Arial";
+          ctx.fillText(`Box ${i+1}`, box.x, box.y - 15);
+
+          drawHandles(box);
+
+          if(modeActive){
+            if(inside && sLine.active && crossLine && !box.cycle.active){
+              box.cycle.active = true;
+              box.cycle.start = Date.now();
+              addLog(`Start Running Time (Box ${i+1})`);
+            } else if(box.cycle.active && (!inside || !sLine.active || !crossLine)){
+              box.cycle.active = false;
+              box.cycle.time = (Date.now() - box.cycle.start) / 1000;
+              addLog(`Stop Running Time (Box ${i+1})`, box.cycle.time);
+              box.cycle.time = 0;
+            }
+          }
+
+          if(box.cycle.active && modeActive){
+            let elapsed = (Date.now() - box.cycle.start) / 1000;
+            ctx.fillStyle = "yellow";
+            ctx.font = "16px Arial";
+            ctx.fillText(`Box ${i+1}: ${elapsed.toFixed(1)}s`, box.x, box.y + box.h + 20);
+          }
+        });
+        ctx.restore();
+      }
+
+      async function runPose(){
+        async function processFrame(){
+          await pose.send({ image: video });
+          requestAnimationFrame(processFrame);
+        }
+        processFrame();
+      }
+
+      function updateOrientation(){
+        if(window.orientation === 90) orientation = 90;
+        else if(window.orientation === -90) orientation = -90;
+        else if(window.orientation === 180) orientation = 180;
+        else orientation = 0;
+      }
+      window.addEventListener("orientationchange", updateOrientation);
+      updateOrientation();
+
+      let draggingBox = null;
+      let resizingBox = null;
+      let draggingSLine = false;
+      let dragOffsetX = 0;
+      let dragOffsetY = 0;
+
+      function startDrag(x, y){
+        if(sLine.active && (isNear(x, y, sLine.x + sLine.w / 2, 10) || isNear(x, y, sLine.x + sLine.w / 2, canvas.height - 10))){
+          draggingSLine = true;
+          dragOffsetX = x - sLine.x;
+          return;
+        }
+        for(let i = boxes.length - 1; i >= 0; i--){
+          let box = boxes[i];
+          if(isNear(x, y, box.x + box.w, box.y + box.h, 25)){
+            resizingBox = box;
+            return;
+          }
+          if(isNear(x, y, box.x + box.w / 2, box.y - 10, 25)){
+            draggingBox = box;
+            dragOffsetX = x - box.x;
+            dragOffsetY = y - box.y;
+            return;
+          }
+        }
+      }
+
+      function moveDrag(x, y){
+        if(draggingSLine){
+          sLine.x = x - dragOffsetX;
+          if (sLine.x < 0) sLine.x = 0;
+          if (sLine.x + sLine.w > canvas.width) sLine.x = canvas.width - sLine.w;
+        } else if(draggingBox){
+          draggingBox.x = x - dragOffsetX;
+          draggingBox.y = y - dragOffsetY;
+          if (draggingBox.x < 0) draggingBox.x = 0;
+          if (draggingBox.y < 0) draggingBox.y = 0;
+          if (draggingBox.x + draggingBox.w > canvas.width) draggingBox.x = canvas.width - draggingBox.w;
+          if (draggingBox.y + draggingBox.h > canvas.height) draggingBox.y = canvas.height - draggingBox.h;
+        } else if(resizingBox){
+          resizingBox.w = x - resizingBox.x;
+          resizingBox.h = y - resizingBox.y;
+          const minSize = 20;
+          if (resizingBox.w < minSize) resizingBox.w = minSize;
+          if (resizingBox.h < minSize) resizingBox.h = minSize;
+        }
+      }
+
+      function endDrag(){
+        draggingBox = null;
+        resizingBox = null;
+        draggingSLine = false;
+      }
+
+      canvas.addEventListener("mousedown", (e) => {
+        const r = canvas.getBoundingClientRect();
+        startDrag(e.clientX - r.left, e.clientY - r.top);
+      });
+      canvas.addEventListener("mousemove", (e) => {
+        const r = canvas.getBoundingClientRect();
+        moveDrag(e.clientX - r.left, e.clientY - r.top);
+      });
+      canvas.addEventListener("mouseup", endDrag);
+      canvas.addEventListener("mouseleave", endDrag); 
+
+      canvas.addEventListener("touchstart", (e) => {
+        e.preventDefault();
+        const r = canvas.getBoundingClientRect();
+        const t = e.touches[0];
+        startDrag(t.clientX - r.left, t.clientY - r.top);
+      }, { passive: false });
+
+      canvas.addEventListener("touchmove", (e) => {
+        e.preventDefault();
+        const r = canvas.getBoundingClientRect();
+        const t = e.touches[0];
+        moveDrag(t.clientX - r.left, t.clientY - r.top);
+      }, { passive: false });
+
+      canvas.addEventListener("touchend", endDrag);
+      canvas.addEventListener("touchcancel", endDrag);
+
+      window.addBox = addBox;
+      window.removeBox = removeBox;
+      window.toggleSLine = toggleSLine;
+      window.toggleMode = toggleMode;
+      window.switchCamera = switchCamera;
+      window.exportLog = exportLog;
+      
+      getCameras();
+    };
+  </script>
+</body>
+</html>
